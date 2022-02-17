@@ -1,0 +1,787 @@
+---
+title: "Grammatical Evolution of pyramid schemes in smart contract environment 3.0"
+author: "Peter Fratric"
+date: "1/17/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+setwd("/home/peter/Desktop/phd/evolutionaryComputation/Coine")
+knitr::opts_chunk$set(echo = TRUE)
+library("gramEvol", quietly = TRUE)
+library(RecordLinkage, quietly = TRUE)
+library("parallel", quietly = TRUE)
+library(ggplot2, quietly = TRUE)
+library(igraph, quietly = TRUE)
+set.seed(319)
+```
+
+# ABM for Ponzi scheme siumulation
+
+## Initialization
+
+```{r init}
+#ABM initialization (global variables)
+Nagents <- 100 + 1
+entry_fee <- rlnorm(Nagents, meanlog = 1.5, sdlog = 0.7 )
+entry_fee <- 10*rbeta(Nagents, 2, 2)
+#entry_fee <- runif(Nagents, max = 1000)
+#th <- runif(Nagents, min = 0, max = 1)
+th <- entry_fee/max(entry_fee)
+#initiator_balance: (should have a starting budget)
+hist(entry_fee, breaks = 25, main = "entry_fee")
+hist(th, breaks = 25, main = "trust thresholds")
+
+#plot function
+plotEvo <- function(title = ""){
+  plot(100*(sort(agent_balance) - sort(entry_fee))/sort(entry_fee), 
+       type = "l",
+       main = paste0("capital distribution change", title),
+       ylab = "money",
+       xlab = "ordered agents by capital")
+  #lines(sort(agent_balance[-Nagents]), col = "red")
+}
+
+append_file <- function(expr, expr_fitness, path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt"){
+  input <- data.frame("expression" = paste(as.character(expr), collapse = ","), "fitness" = expr_fitness)
+  write.table(input, file=path, append = TRUE, sep = "|", row.names = FALSE, col.names = FALSE)
+}
+read_file <- function(path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt"){
+  df <- read.table(file=path, sep = "|")
+  colnames(df) <- c("expr","fitness")
+  return(df)
+}
+
+#capital distribution
+plot(sort(entry_fee), main = "initial distribution of capital")
+```
+
+## Transaction graph actions
+
+```{r graph_actions}
+addNode <- function(node_id){
+  if(length(node_id) > 1){
+    initiator_balance <<- initiator_balance - 100
+    stop(paste0(node_id," in addNode(node_id) is of lenght > 1"))
+  }else if(node_id %in% V(g1)$name){
+    initiator_balance <<- initiator_balance - 100
+    stop(paste0(node_id," in addNode(node_id) is already in V(g1)$name"))
+  }else{
+    if(is.null(node_id)){
+      initiator_balance <<- initiator_balance - 100
+      stop("node_id in addNode(node_id) is NULL")
+    }else{
+      g1 <<- g1 + vertices(node_id)
+    }
+  }
+}
+
+addEdge <- function(node_id_from, node_id_to, weight){
+  if(length(node_id_to) > 1){
+    initiator_balance <<- initiator_balance - 100
+    stop(paste0(node_id_to," in addEdge is of lenght > 1"))
+  }else if(are.connected(g1, as.character(node_id_from), as.character(node_id_to)) == FALSE){
+    g1 <<- add_edges(g1, c(node_id_from, node_id_to))
+    g1 <<- set_edge_attr(g1, "weight", index = E(g1)[length(E(g1))], value = weight)
+  }
+}
+
+
+# in order for this action to make sense, you need to introduce a premis that implicitly tells you there is an edge between two nodes
+# e.g. if IDinProfit, then remove edge c(contract, ID); if lastUnpayed == TRUE: then remove edge c(contract, lastUnpayedID() )
+# removeEdge <- function(node_id_from, node_id_to){
+#   if(are.connected(g1, as.character(node_id_from), as.character(node_id_to)) == TRUE){
+#     e <- data.frame(from = as.character(node_id_from), to = as.character(node_id_to))
+#     e <- apply(e, 1, paste, collapse="|")
+#     e <- edges(e)
+#     g1 <<- g1 - e
+#   }else{
+#     #initiator_balance <<- initiator_balance - 100
+#     #stop("vertecies are not connected in removeEdge")
+#   }
+# }
+
+removeEdges <- function(node_ids){
+  if(length(node_ids) > 0){
+    for(node_id_to in node_ids){
+      if(are.connected(g1, "contract", as.character(node_id_to)) == TRUE){
+        e <- data.frame(from = "contract", to = as.character(node_id_to))
+        e <- apply(e, 1, paste, collapse="|")
+        e <- edges(e)
+        g1 <<- g1 - e
+      }
+    }
+  }
+}
+
+updateEdge <- function(node_id_from, node_id_to, new_weight){
+  if(are.connected(g1, as.character(node_id_from), as.character(node_id_to)) == TRUE){
+    e <- data.frame(from = as.character(node_id_from), to = as.character(node_id_to))
+    e <- apply(e, 1, paste, collapse="|")
+    e <- edges(e)  
+    g1 <<- set_edge_attr(g1, "weight", index = e[[1]], new_weight)
+  }
+}
+```
+
+
+```{r graph_plot_pic}
+
+plotG <- function(g = NULL, lyt=layout_as_star(g)){
+  plot(g, layout = lyt, vertex.label.cex = 2, vertex.label.dist=2.5, edge.width = 2.5, edge.color = "black", edge.arrow.size = 1, edge.label = edge_attr(g1, "weight"), edge.label.cex = 2)
+}
+
+#jpeg(filename="graphinit.jpg", width = 3*300, height = 250)
+par(mar = c(2, 2, 2, 2))
+op <- par(mfrow=c(1,3))
+
+n_tmp <- 6
+g1 <- make_empty_graph(n_tmp)
+V(g1)$name <- c("contract", "initiator",as.character(1:(n_tmp-2)))
+V(g1)$color <- c("red", "red", rep("blue", n_tmp-2))
+l <- layout_with_fr(g1) 
+plotG(g1, l)
+box(col = "grey", which = "figure")
+addEdge(1, "contract", 11.15)
+#E(g1)$weight <- edge_attr(g1, "weight")
+plotG(g1, l)
+box(col = "grey", which = "figure")
+V(g1)$color <- c("red", "red", "red", rep("blue", n_tmp-3))
+
+e <- data.frame(from = as.character(1), to = "contract")
+e <- apply(e, 1, paste, collapse="|")
+e <- edges(e)
+g1 <<- g1 - e
+
+plotG(g1, l)
+box(col = "grey", which = "figure")
+par(op)
+#dev.off()
+```
+
+```{r abm}
+penalty <- function(expr){
+  return(0)
+}
+
+accept_vector <- rep(0, Nagents)
+agent_balance <- rep(0, Nagents)
+contract_balance <- 0.0
+initiator_balance <- 0.0
+g1 <- make_empty_graph(2)
+V(g1)$name <- c("contract", "initiator")
+addEdge("contract", "initiator", 0.5)
+
+#ABM definition
+ABM <- function(expr, writeToFile = TRUE, path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt", toplot = FALSE, iterseq = NULL){
+  #stats
+  users_pop <<- c(0)
+  #print(expr)
+  #append_file(expr, 0, path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprs.txt")
+  
+  #reorder the th vector so that the most gullible agents are at the start
+  
+  #entry_fee <<- sort(entry_fee)
+  #th <<- entry_fee/max(entry_fee)
+
+  #initialize global variables
+  accept_vector <<- rep(0, Nagents)
+  agent_balance <<- entry_fee
+  contract_balance <<- 0
+  initiator_balance <<- 0
+  g1 <<- make_empty_graph(2)
+  V(g1)$name <<- c("contract", "initiator")
+  line_to_pay <<- NULL
+  paying <<- NULL
+  #addEdge("contract", "initiator", 0.5)
+  #initialize local variables
+  n_users <- 1
+  contractID <- "contract"
+  initiatorID <- "initiator"
+  
+  #Simulation
+  steps <- 1
+  maxsteps <- Nagents
+  if(is.null(iterseq)){
+    iterseq <- rep(TRUE, maxsteps)
+  }
+
+  new_accepts <- TRUE
+  while(new_accepts == TRUE && steps < maxsteps){
+    users_pop <<- c(users_pop, n_users)
+    
+    #calculate trust of a contract
+    if(n_users > 0){
+      tmp_profit <- agent_balance - entry_fee
+      agents_in_profit <- which(tmp_profit > 0 & accept_vector == 1)
+      trust_coef <- (1-penalty(expr))*((1+length(agents_in_profit))/n_users)*((n_users/Nagents)^Kpar) #1-exp(-1/101)
+    }
+    
+    new_users <- which(trust_coef > th & accept_vector == 0)
+    if(length(new_users) > 0){
+
+      new_userID <- new_users[1]
+      fee <- entry_fee[new_userID]
+      contract_balance <<- contract_balance + fee
+      agent_balance[new_userID] <<- agent_balance[new_userID] - fee
+      n_users <- n_users + 1
+      accept_vector[new_userID] <<- 1
+      addToLine(new_userID)
+      
+      addNode(new_userID)
+      
+      #contract
+      tryCatch(eval(expr), error=function(e){initiator_balance <<- initiator_balance - 100})
+      #tryCatch(eval(expr), error=function(e){initiator_balance <<- initiator_balance - 100}, finally = {append_file(expr, initiator_balance);return(initiator_balance)})
+      #tryCatch(eval(expr), error=function(e){print(e)})
+      #print("running")
+      tryCatch(graph_exec(), error=function(e){initiator_balance <<- initiator_balance - 100})
+      #tryCatch(graph_exec(), error=function(e){print(e)})
+      if(toplot == TRUE && iterseq[steps] == TRUE){
+        lout <- layout_as_star(g1)
+        plot(g1, layout = lout)
+        box(col = "grey", which = "figure")
+      }
+    }else{
+      #stopping condition
+      new_accepts <- FALSE
+    }
+    steps <- steps + 1
+  }
+  if(writeToFile == TRUE){
+    append_file(expr, initiator_balance, path)
+  }
+  return(initiator_balance)
+}
+
+#expr <- expression(if(TRUE) addNode(new_userID), if(TRUE) addEdge(contractID, new_userID, 0.5*contract_balance))
+#ABM(expr = expr)
+```
+
+
+## transaction graph exectution
+
+```{r transaction_graph}
+graph_exec <- function(){
+  #if(is.null(getLastSentID()) == FALSE){
+  #  edge_id <- get.edge.ids(g1, c(getLastSentID(), "contract"))
+  #  to_pay <- E(g1)[edge_id]$weight
+  #  contract_balance <<- contract_balance + to_pay
+  #  agent_balance[getLastSentID()] <<- agent_balance
+  #}
+  
+  if(gsize(g1) > 0){
+    ws <- E(g1)[from("contract")]$weight
+    es <- adjacent_vertices(g1, "contract")$contract
+    for(i in 1:length(ws)){
+      to_pay <- ws[i]
+      usr_to_id <- es[i]$name
+      
+      if(contract_balance - to_pay >= 0){
+        if(usr_to_id == "initiator"){
+          contract_balance <<- contract_balance - to_pay
+          initiator_balance <<- initiator_balance + to_pay
+        }else{
+          usr_to_id <- as.numeric(usr_to_id)
+          contract_balance <<- contract_balance - to_pay
+          agent_balance[usr_to_id] <<- agent_balance[usr_to_id] + to_pay
+          
+          paying <<- paying + 1
+          if(paying == length(line_to_pay) + 1){
+            paying <<- 1
+          }
+          
+        }
+      }else{
+        break
+      }
+    }
+  }
+}
+
+```
+
+# Generation of Ponzi schemes
+
+expression(if (NUsersEq(2)) addEdge(contractID, initiatorID, 0.2 * getFee(new_userID)), if(TRUE) addNode(new_userID), if(BalanceFeeHigher(getNextToPay())) addEdge(contractID, getNextToPay(), 1.2 * getFee(getNextToPay())), if (TRUE) removeEdges(userInProfit()))
+
+## Premises and --get-- methods
+
+```{r factsandids}
+#facts
+BalanceFeeHigher <- function(node_id, wei){
+  if(is.null(node_id)){
+    initiator_balance <<- initiator_balance - 100
+    stop("node_id in BalanceFeeHigher(node_id) is NULL")
+  }else if(length(node_id) > 1){
+    initiator_balance <<- initiator_balance - 100
+    stop("node_id in BalanceFeeHigher(node_id) is of lenght > 1")
+  }else if(node_id == "initiator"){
+    initiator_balance <<- initiator_balance - 100
+    stop("node_id in BalanceFeeHigher(node_id) is initiator")
+  }else if(contract_balance >= wei){
+    if(are.connected(g1, as.character("contract"), as.character(node_id)) == FALSE){
+      return(TRUE)
+    }
+  }
+  return(FALSE)
+}
+
+#get attributes
+NUsersEq <- function(n){
+  if(gorder(g1) == n + 2){
+    return(TRUE)
+  }
+  return(FALSE)
+}
+
+getFee <- function(node_id){
+  if(is.null(node_id)){
+    initiator_balance <<- initiator_balance - 100
+    stop("node_id in getFee(node_id) is NULL")
+  }else if(length(node_id) > 1){
+    initiator_balance <<- initiator_balance - 100
+    stop(paste0(node_id," in getFee(node_id) is of length > 1"))
+  }else if(node_id == "initiator"){
+    initiator_balance <<- initiator_balance - 100
+    stop(paste0(node_id," in getFee(node_id) is initiator"))
+  }else{
+    return(entry_fee[node_id])
+  }
+}
+
+userInProfit <- function(){
+  tmp_profit <- agent_balance - entry_fee
+  tmp <- which(tmp_profit > 0 & accept_vector == 1)
+  return(tmp)
+}
+
+
+#you need to extend the ABM to safe the order of arrival
+line_to_pay <- NULL
+paying <- NULL
+addToLine <- function(new_user){
+  if(length(line_to_pay) == 0){
+    line_to_pay <<- c(new_user)
+    paying <<- 1
+  }else{
+    line_to_pay <<- c(line_to_pay, new_user)
+  }
+}
+
+getNextToPay <- function(){
+  return(line_to_pay[paying])
+}
+
+getLastPaid <- function(){
+  return(line_to_pay[paying - 1])
+}
+
+```
+
+## Benchmark cases
+
+TODO:
+1. seems to work ok for waterfall, but with edgeUpdate would be better
+2. seems to work ok for array scheme, but move if's from functions to grammar to make the logic more visible in the paper
+
+```{r expressions}
+Kpar <- 0.1
+
+expr2 <- expression(if (NUsersEq(1)) addEdge(contractID, initiatorID, 0.5 * getFee(new_userID)), if(TRUE) addEdge(contractID, new_userID, 0.5 * getFee(new_userID)) )
+
+ABM(expr2, writeToFile = FALSE, toplot = TRUE)
+gorder(g1)
+gsize(g1)
+```
+
+```{r exprArray}
+# connectedUserInProfit
+# if (BalanceFeeHigher(getNextToPay()) && disconnected)
+
+#note that sometimes the edge for NextToPay agent is not executed for a longer time (2-3 images), but this is only because there is also an arrow for the initiator and so, after sending to initiator first, there might not be enough capital left for second transaction
+expr3 <- expression(
+  if (NUsersEq(1)) addEdge(contractID, initiatorID, 0.5 * getFee(new_userID)), 
+  if(BalanceFeeHigher(getNextToPay(), 1.2*getFee(getNextToPay()))) addEdge(contractID, getNextToPay(), 1.2 * getFee(getNextToPay())), 
+  if(TRUE) removeEdges(getLastPaid()))
+
+ABM(expr3, writeToFile = FALSE, toplot = TRUE)
+gorder(g1)
+gsize(g1)
+```
+
+## Waterfall
+
+```{r gramdef}
+# terminals addEdge, removeEdge, addNode, Remove Node
+
+#waterfall discovery
+ruleDef <- list(start = gsrule("<clause>;<start>","<clause>"),
+                clause = gsrule("if(<premise>) <action>"),
+                #premise = gsrule("<fact>","<fact> && <premise>"),
+                premise = gsrule("TRUE","NUsersEq(<int>)"),#, "BalanceFeeHigher(<node>)"),
+                int = grule(1,2,3,4,5,10,50),
+                action = gsrule("addNode(<node>)", "addEdge(contractID,<node>,<weight>)", "removeEdges(<node>)"),
+                weight = gsrule("<mult>*getFee(<node>)", "<mult>*contract_balance"), 
+                node = gsrule("new_userID", "initiatorID"),
+                mult = grule(0.06, 0.1, 0.2, 0.5, 1.2, 2.0)
+                )
+
+grammarDef <- CreateGrammar(ruleDef)
+grammarDef
+GetGrammarNumOfExpressions(grammarDef, max.depth = 6)
+GetGrammarMaxSequenceLen(grammarDef, max.depth = 6)
+```
+
+
+```{r}
+#btw this works: eval(expression(print(1+5),print(5+5))) and has the same form as what goes from grammar expression(expr,expr,...,expr)
+
+randExamples <- GrammarRandomExpression(grammarDef, 2, max.depth = 25)
+randExamples
+```
+
+## Grammatical Evolution
+
+```{r optevo}
+fitness <- function(expr) {
+  contract_owner_total <- ABM(expr)
+  #return contract owner obtained total
+  if(any(is.nan(contract_owner_total)))
+    return(Inf)
+  return(-contract_owner_total)
+}
+
+monitorFunc <- function(result) {
+  if(result$population$currentIteration %% 50 == 0){
+    cat("iteration", result$population$currentIteration, "Best of gen:", min(result$best$cost), "\n")
+  }
+}
+
+gc()
+
+if(file.exists("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")==TRUE){
+  file.remove("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+}else{
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+}
+
+start.time <- Sys.time()
+#cl <- makeCluster(6)
+#clusterEvalQ(cl, library("gramEvol"))
+#clusterEvalQ(cl, library("igraph"))
+#clusterExport(cl, c("fitness","ABM","Nagents","entry_fee","th","penalty","append_file","make_empty_graph","V","addToLine"))
+ge <- GrammaticalEvolution(grammarDef, fitness, terminationCost = -20, iterations = 100, max.depth = 6, popSize = 100, elitism = 0, monitorFunc = monitorFunc)#, plapply = function(...) parLapply(cl, ...))
+#stopCluster(cl)
+end.time <- Sys.time()
+
+ge
+
+time.taken <- end.time - start.time
+time.taken
+
+buffer_stack <- read_file()
+plot(tail(sort(as.numeric(buffer_stack$fitness)),20), type = "l", main = "best 20 solutions")
+```
+
+
+```{r plot_prepare}
+tmp <- which(as.numeric(buffer_stack$fitness) > 20)
+length(tmp)
+tmp <- as.numeric(buffer_stack$fitness)[tmp]
+hist(tmp)
+```
+
+## Array-based scheme
+
+expr3 <- expression(
+  if (NUsersEq(1)) addEdge(contractID, initiatorID, 0.5 * getFee(new_userID)), 
+  if(BalanceFeeHigher(getNextToPay(), 1.2*getFee(getNextToPay()))) addEdge(contractID, getNextToPay(), 1.2 * getFee(getNextToPay())), 
+  if(TRUE) removeEdges(getLastPaid()))
+
+```{r gramdef_extended}
+# terminals addEdge, removeEdge, addNode, Remove Node
+
+added_actions <-  "if(NUsersEq(1)) addEdge(contractID, initiatorID, 0.5 * getFee(new_userID)); 
+  if(BalanceFeeHigher(getNextToPay(), 1.2*getFee(getNextToPay()))) addEdge(contractID, getNextToPay(), 1.2 * getFee(getNextToPay()))"
+
+
+#added_actions <- "if(NUsersEq(1)) addEdge(contractID,initiatorID,<mult>*getFee(new_userID))"
+
+
+
+#waterfall discovery
+ruleDef_ext <- list(#init = gsrule(paste(added_actions,"<start>",sep = ";")),
+                start = gsrule("<clause>;<start>","<clause>"),
+                clause = gsrule("if(<premise>) <action>"),
+                #premise = gsrule("<fact>","<fact> && <premise>"),
+                premise = gsrule("TRUE","NUsersEq(<int>)","BalanceFeeHigher(<node>, <weight>)"),
+                int = grule(1,2,3,4,5,10,50),
+                action = gsrule("addNode(<node>)","addEdge(contractID,<node>,<weight>)", "removeEdges(<node>)"),
+                weight = gsrule("<mult>*getFee(<node>)", "<mult>*contract_balance"),
+                node = gsrule("new_userID", "initiatorID", "getNextToPay()", "getLastPaid()"),
+                mult = grule(0.06, 0.1, 0.2, 0.5, 1.2, 2.0)
+                )
+
+grammarDef <- CreateGrammar(ruleDef_ext)
+grammarDef
+GetGrammarNumOfExpressions(grammarDef, max.depth = 10)
+GetGrammarMaxSequenceLen(grammarDef, max.depth = 10)
+```
+
+
+```{r}
+#btw this works: eval(expression(print(1+5),print(5+5))) and has the same form as what goes from grammar expression(expr,expr,...,expr)
+
+randExamples <- GrammarRandomExpression(grammarDef, 5, max.depth = 9)
+randExamples
+```
+
+## Grammatical Evolution
+
+```{r optevo}
+fitness <- function(expr) {
+  contract_owner_total <- ABM(expr, path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")
+  #return contract owner obtained total
+  if(any(is.nan(contract_owner_total)))
+    return(Inf)
+  return(-contract_owner_total)
+}
+
+gc()
+
+if(file.exists("/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")==TRUE){
+  file.remove("/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")
+}else{
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")
+}
+
+
+itterationsNoImprove <- 0
+best_so_far <- 0
+monitorFunc <- function(result) {
+  if(min(result$best$cost) < best_so_far){
+    cat("new best", min(result$best$cost), "\n")
+    best_so_far <<- min(result$best$cost)
+    itterationsNoImprove <<- 0
+  }else{
+    itterationsNoImprove <<- itterationsNoImprove + 1
+  }
+  #if(result$population$currentIteration %% 50 == 0){
+  #  cat("iteration", result$population$currentIteration, "Best of gen:", min(result$best$cost), "\n")
+  #}
+}
+
+
+
+adaptive <- function(maxiter = 20){ #max iter defines the maximum multiple of initial mutationChance
+  iter_small <- 100
+  max_dep <- 10
+  pops <- 100
+  
+  ge <- GrammaticalEvolution(grammarDef, fitness, terminationCost = -70, iterations = iter_small, max.depth = max_dep, popSize = pops, elitism = 0, monitorFunc = monitorFunc, optimizer = "ga")
+  mutChan_init <- ge$settings$mutationChance
+  
+  totalMax <- 1000
+  iter_total_max <- 1
+  iter <- 1 #multiple of mutationChance
+  while(iter < maxiter && ge$best$cost > -70 && iter_total_max < totalMax){
+    mat <- t(ge$population$population[1:round(0.95*pops),])
+    initPop <- split(mat, rep(1:ncol(mat), each = nrow(mat)))
+    
+    if(itterationsNoImprove >= iter_small){
+      iter <- iter + 1
+      mutChan <- iter*mutChan_init
+      cat("no improvement for ", itterationsNoImprove, ", reruning search with higher mutation: ", mutChan, "\n")
+    }else{
+      iter <- 1
+      mutChan <- mutChan_init
+    }
+    ge <- GrammaticalEvolution(grammarDef, fitness, terminationCost = -70, iterations = iter_small, max.depth = max_dep, popSize = pops, elitism = 0, monitorFunc = monitorFunc, optimizer = "ga", suggestions = initPop, mutationChance = mutChan)
+    cat("iter_total ", iter_total_max, "\n")
+    iter_total_max <- iter_total_max + 1
+  }
+  return(ge)
+}
+
+start.time <- Sys.time()
+ge_res <- adaptive()
+end.time <- Sys.time()
+
+
+#cl <- makeCluster(6)
+#clusterEvalQ(cl, library("gramEvol"))
+#clusterEvalQ(cl, library("igraph"))
+#clusterExport(cl, c("fitness","ABM","Nagents","entry_fee","th","penalty","append_file","make_empty_graph","V","addToLine"))
+#ge <- GrammaticalEvolution(grammarDef, fitness, terminationCost = -70, iterations = 10, max.depth = 10, popSize = 300, elitism = 0, monitorFunc = monitorFunc, optimizer = "ga", suggestions = initPop )#, mutationChance = 100/(1+GetGrammarMaxSequenceLen(grammarDef, max.depth = 8)))#, plapply = function(...) parLapply(cl, ...))
+#stopCluster(cl)
+
+
+
+
+time.taken <- end.time - start.time
+time.taken
+
+buffer_stack <- read_file(path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")
+plot(tail(sort(as.numeric(buffer_stack$fitness)),20), type = "l", main = "best 20 solutions")
+```
+
+
+
+
+## result analysis
+
+```{r read}
+buffer_stack1 <- read_file()
+buffer_stack2 <- read_file(path = "/home/peter/Desktop/phd/evolutionaryComputation/Coine/expr.txt")
+```
+
+```{r analy}
+plot(sort(as.numeric(buffer_stack2$fitness), decreasing = TRUE)[100:1], type = "l", main = "best 50 solutions", ylim = c(10,65))
+lines(sort(as.numeric(buffer_stack1$fitness), decreasing = TRUE)[100:1], type = "l")
+```
+
+```{r test_Water}
+tmp <- order(as.numeric(buffer_stack1$fitness), decreasing = TRUE)
+strtmp <- strsplit(buffer_stack1$expr[tmp[1]], ",i")[[1]]
+for(i in 2:length(strtmp)){
+  strtmp[i] <- paste0('i',strtmp[i])
+}
+tmp_water <- parse(text = strtmp)
+tmp_water
+iterseq <- rep(FALSE, Nagents)
+iterseq[c(1,2,10,10)] <- TRUE
+ABM(tmp_water, writeToFile = FALSE, toplot = TRUE, iterseq = iterseq)
+```
+
+```{r test_array}
+tmp <- order(as.numeric(buffer_stack2$fitness), decreasing = TRUE)
+strtmp <- strsplit(buffer_stack2$expr[tmp[1]], ",i")[[1]]
+for(i in 2:length(strtmp)){
+  strtmp[i] <- paste0('i',strtmp[i])
+}
+tmp_array <- parse(text = strtmp)
+tmp_array
+iterseq <- rep(FALSE, Nagents)
+iterseq[c(1,2,10,20)] <- TRUE
+iterseq <- rep(TRUE, Nagents)
+ABM(tmp_array, writeToFile = FALSE, toplot = TRUE, iterseq = iterseq)
+
+```
+```{r}
+jpeg(filename="topos.jpg", width = 2*480, height = 480)
+op <- par(mfrow=c(2,3))
+iterseq <- rep(FALSE, Nagents)
+iterseq[c(4,8,12)] <- TRUE
+ABM(tmp_water, writeToFile = FALSE, toplot = TRUE, iterseq = iterseq)
+ABM(tmp_array, writeToFile = FALSE, toplot = TRUE, iterseq = iterseq)
+par(op)
+dev.off()
+
+```
+
+
+--------------------------------------------------------------------------------------------------------------------------------------------
+
+## Exhaustive Search
+
+```{r exchaustive}
+gc()
+if(file.exists("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")==TRUE){
+  file.remove("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+}else{
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+}
+
+monitorFunc <- function(result) {
+  if(result$population$currentIteration %% 100 == 0){
+    cat("iteration", result$population$currentIteration, "Best of gen:", min(result$best$cost), "\n")
+  }
+}
+
+gex <- GrammaticalExhaustiveSearch(grammarDef, fitness, terminationCost = -50, max.depth = 6)#, monitorFunc = monitorFunc)
+gex
+```
+
+## Exhaustive Search
+
+```{r exchaustive}
+gc()
+if(file.exists("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")==TRUE){
+  file.remove("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+}else{
+  file.create("/home/peter/Desktop/phd/evolutionaryComputation/Coine/exprFile.txt")
+}
+
+monitorFunc <- function(result) {
+  if(result$population$currentIteration %% 100 == 0){
+    cat("iteration", result$population$currentIteration, "Best of gen:", min(result$best$cost), "\n")
+  }
+}
+
+gex <- GrammaticalExhaustiveSearch(grammarDef, fitness, terminationCost = -5000, max.depth = 5)#, monitorFunc = monitorFunc)
+gex
+```
+
+## Grammatical Evolution penalized
+
+```{r penalized}
+#threshold stack
+#stack_expr <- safe_beffer_stack$stack[tail(order(as.numeric(safe_beffer_stack$fitness)),6)]
+#buffer_stack <- data.frame("stack" = NA, "fitness" = NA)
+
+
+buffer_stack <- read_file()
+stack_expr <- buffer_stack$expr[which(buffer_stack$fitness > mean(buffer_stack$fitness) + sd(buffer_stack$fitness))]
+
+
+cl <- makeCluster(8)
+clusterEvalQ(cl, library("gramEvol"))
+clusterExport(cl, c("fitness","ABM","Nagents","entry_fee","th","penalty","send","addUser","removeUser","getBalance","append_file","stack_expr"))
+ge_penalized <- GrammaticalEvolution(grammarDef, fitness, terminationCost = -5000, iterations = 1000, max.depth = 5, popSize = 32, elitism = 4, monitorFunc = monitorFunc, plapply = function(...) parLapply(cl, ...))
+stopCluster(cl)
+
+
+# higher mutation seems to screew thisngs up
+
+ge_penalized
+```
+
+
+## deployment and testing of the screening
+
+
+
+```{r plot}
+data <- data.frame(
+  agent=1:Nagents,
+  percentage=colMeans(tmpM),
+  upperQ = matrixStats::colQuantiles(tmpM, probs = 0.80),
+  lowerQ = matrixStats::colQuantiles(tmpM, probs = 0.20),
+  basicPonzi = sort(ponziCases$BasicPonzi),
+  arrayPS = sort(ponziCases$ArrayPS),
+  waterfallScheme = sort(ponziCases$WaterfallScheme),
+  handoverScheme = sort(ponziCases$HandoverScheme)
+)
+# Most basic error bar
+p <- ggplot(data) +
+    geom_bar( aes(x=agent, y=percentage), stat="identity", fill="skyblue", alpha=0.8) +
+    geom_errorbar( aes(x=agent, ymin=lowerQ, ymax=upperQ), width=0.4, colour="orange", alpha=0.6, size=1.2) + 
+    geom_line(aes(x=agent, y=arrayPS, colour = "Array")) +
+    geom_line(aes(x=agent, y=waterfallScheme, colour = "Waterfall")) +
+    ggtitle(paste0("mean gain/loss percentange distribution for the best ",n_best," contracts \nwith 20% upper/lower qunatile")) 
+
+p
+ggsave("distribution.png")
+```
+
+```{r findScheme}
+tmp <- which.min(abs(buffer_stack$fitness - ABM(WaterfallScheme, FALSE)))
+parse(text = buffer_stack$expr[tmp])
+
+
+```
